@@ -268,6 +268,7 @@ def compute_grpo_outcome_advantage(
     config: Optional[AlgoConfig] = None,
     grpo_uid_to_pos_count: Optional[dict[Any, int]] = None,
     grpo_uid_to_neg_count: Optional[dict[Any, int]] = None,
+    weights: Optional[dict[Any, float]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -366,7 +367,10 @@ def compute_grpo_outcome_advantage(
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
-                scores[i] = scores[i] - id2mean[index[i]]
+                if weights is not None:
+                    scores[i] = weights[index[i]] * (scores[i] - id2mean[index[i]])
+                else:
+                    scores[i] = scores[i] - id2mean[index[i]]
 
         scores = scores.unsqueeze(-1) * response_mask
 

@@ -28,7 +28,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pprint import pprint
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import ray
@@ -216,6 +216,7 @@ def compute_advantage(
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    weights: Optional[dict[Any, float]] = None,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
 
@@ -276,6 +277,7 @@ def compute_advantage(
             config=config,
             grpo_uid_to_pos_count=grpo_uid_to_pos_count,
             grpo_uid_to_neg_count=grpo_uid_to_neg_count,
+            weights=weights,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1020,7 +1022,7 @@ class RayPPOTrainer:
         weights = {}
         for uid in uid_arr:
             p = max(effective_p_hat(uid), 1e-6)
-            weights[uid] = 1.0 / p
+            weights[uid] = 1.0 / math.sqrt(p)
         weight_sum = sum(weights.values())
 
         per_uid_budget = {uid: base_each for uid in uid_arr}
@@ -1164,10 +1166,7 @@ class RayPPOTrainer:
 
         self.reinforce_ada_global_stats = global_stats
 
-        return final_batch, rounds_info
-
-
-
+        return final_batch, rounds_info, weights
 
     def fit(self):
         """
@@ -1260,7 +1259,7 @@ class RayPPOTrainer:
                     # generate a batch
                     if self.config.algorithm.multiround_adaptive_downsampling:
                         with marked_timer("gen_multi_round", timing_raw, color="red"):
-                            final_batch, rounds_info = self._generate_multi_round_adaptive_downsampling(
+                            final_batch, rounds_info, weights = self._generate_multi_round_adaptive_downsampling(
                                 orig_prompt_batch=gen_batch,
                                 positive_threshold=self.config.algorithm.positive_threshold,
                                 max_rounds=self.config.algorithm.max_rounds,
@@ -1442,6 +1441,7 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
+                            weights=weights if self.config.algorithm.multiround_adaptive_downsampling else None,
                         )
 
                     # update critic
