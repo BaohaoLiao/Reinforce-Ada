@@ -1,20 +1,22 @@
 #!/bin/bash
 
+cd /data/${KRYLOV_NAMESPACE}/data/baliao/dynamic_filter/03_new_algo/Reinforce-Ada
+
 set -xeuo pipefail
 
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WORKING_DIR="${PWD}"
 
 # Model
-model_name_or_path=qwen/Qwen2.5-Math-1.5B
+model_name_or_path=/mnt/nushare2/data/baliao/PLLMs/qwen/Qwen2.5-Math-1.5B
 model_name=Qwen2.5-Math-1.5B
 
 # Wandb setting
 project_name=Reinforce-Ada
-experiment_name=Reinforce-Ada_${model_name}
+experiment_name=Reinforce-Ada_p_${model_name}_easy_prompt
 
 # Output
-ckpts_dir="./outputs/${project_name}/${experiment_name}"
+ckpts_dir="/mnt/nushare2/data/baliao/dynamic_filter/03_new_algo/${experiment_name}"
 mkdir -p "${ckpts_dir}/logs"
 
 # Trainig setting
@@ -59,8 +61,8 @@ global_stat_est=True
 norm_adv_by_std_in_grpo=False
 
 # Training data
-train_path=./data/openr1/train.parquet
-test_path=./data/openr1/test.parquet
+train_path=/mnt/nushare2/data/baliao/dynamic_filter/data/openr1/qwen1.5b_easy/train.parquet
+test_path=/mnt/nushare2/data/baliao/dynamic_filter/data/test/test.parquet
 train_files="['$train_path']"
 test_files="['$test_path']"
 
@@ -140,6 +142,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=50 \
     trainer.save_freq=50 \
     trainer.total_epochs=1000 \
-    trainer.total_training_steps=400 \
+    trainer.total_training_steps=800 \
     trainer.default_local_dir=${ckpts_dir} \
-    trainer.log_val_generations=10 2>&1 | tee ${ckpts_dir}/logs/log                                                                  
+    trainer.log_val_generations=10 2>&1 | tee ${ckpts_dir}/logs/log
+                                                             
