@@ -1025,6 +1025,61 @@ class RayPPOTrainer:
             weights[uid] = 1.0 / math.sqrt(p)
         weight_sum = sum(weights.values())
 
+        # Cap a single prompt's budget to avoid one prompt consuming everything.
+        max_budget_per_prompt = int(self.config.algorithm.get("max_budget_per_prompt", 32))
+
+        def cap_and_redistribute(per_uid_budget: dict[str, int]) -> dict[str, int]:
+            """
+            Enforce per-prompt cap and redistribute overflow to others by weight.
+            Total stays the same unless all prompts hit the cap.
+            """
+            overflow = 0
+            for uid in uid_arr:
+                if per_uid_budget[uid] > max_budget_per_prompt:
+                    overflow += per_uid_budget[uid] - max_budget_per_prompt
+                    per_uid_budget[uid] = max_budget_per_prompt
+
+            candidates = [uid for uid in uid_arr if per_uid_budget[uid] < max_budget_per_prompt]
+            while overflow > 0 and candidates:
+                weight_sum_cand = sum(weights[u] for u in candidates)
+                if weight_sum_cand <= 0:
+                    weight_sum_cand = float(len(candidates))
+                    cand_weights = {u: 1.0 for u in candidates}
+                else:
+                    cand_weights = {u: weights[u] for u in candidates}
+
+                extra_floats = {u: overflow * (cand_weights[u] / weight_sum_cand) for u in candidates}
+                extra_floor = {u: int(math.floor(v)) for u, v in extra_floats.items()}
+                allocated = 0
+                for u in candidates:
+                    room = max_budget_per_prompt - per_uid_budget[u]
+                    add = min(extra_floor[u], room)
+                    per_uid_budget[u] += add
+                    allocated += add
+                overflow -= allocated
+
+                if overflow > 0:
+                    frac_order = sorted(
+                        candidates, key=lambda u: extra_floats[u] - extra_floor[u], reverse=True
+                    )
+                    for u in frac_order:
+                        if overflow <= 0:
+                            break
+                        if per_uid_budget[u] < max_budget_per_prompt:
+                            per_uid_budget[u] += 1
+                            overflow -= 1
+
+                candidates = [u for u in uid_arr if per_uid_budget[u] < max_budget_per_prompt]
+                if allocated == 0 and (not candidates or weight_sum_cand == 0):
+                    break
+
+            if overflow > 0:
+                print(
+                    f"[warn] Could not redistribute full overflow with cap {max_budget_per_prompt}, "
+                    f"dropping {overflow} samples from budget."
+                )
+            return per_uid_budget
+
         per_uid_budget = {uid: base_each for uid in uid_arr}
         if remaining_budget > 0 and weight_sum > 0:
             # 先按比例分配整数部分
@@ -1056,6 +1111,8 @@ class RayPPOTrainer:
                     overflow -= 1
                 else:
                     idx += 1
+
+        per_uid_budget = cap_and_redistribute(per_uid_budget)
 
         # ====== 构造一次性的 mini batch ======
         t0 = time.time()
