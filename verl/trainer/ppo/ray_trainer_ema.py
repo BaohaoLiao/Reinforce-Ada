@@ -1114,6 +1114,7 @@ class RayPPOTrainer:
 
         per_uid_budget = cap_and_redistribute(per_uid_budget)
         rounds_info["max_budget_per_prompt"] = max(per_uid_budget.values()) if per_uid_budget else 0
+        rounds_info["min_budget_per_prompt"] = min(per_uid_budget.values()) if per_uid_budget else 0
 
         # ====== 构造一次性的 mini batch ======
         t0 = time.time()
@@ -1346,6 +1347,7 @@ class RayPPOTrainer:
                         metrics["sampling/downsampled_samples"] = len(final_batch)
                         metrics["sampling/total_prompts"] = total_prompts
                         metrics["sampling/max_budget_per_prompt"] = rounds_info.get("max_budget_per_prompt", 0)
+                        metrics["sampling/min_budget_per_prompt"] = rounds_info.get("min_budget_per_prompt", 0)
 
                         batch = final_batch
 
