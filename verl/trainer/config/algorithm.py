@@ -93,3 +93,4 @@ class AlgoConfig(BaseConfig):
     max_rounds: int = 4
     round_repeat: int = 8
     global_stat_est: bool = False
+    max_budget_per_prompt: int = 32
