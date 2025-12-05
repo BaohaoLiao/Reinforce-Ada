@@ -94,4 +94,4 @@ class AlgoConfig(BaseConfig):
     round_repeat: int = 8
     global_stat_est: bool = False
     max_budget_per_prompt: int | None = 32
-    min_budget_per_prompt: int | None = 1
+    min_budget_per_prompt: int | None = 2
