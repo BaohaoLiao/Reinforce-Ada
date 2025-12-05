@@ -1014,8 +1014,30 @@ class RayPPOTrainer:
         # ====== 一次性预算分配 ======
         # 总预算:  round_repeat * num_prompts
         total_budget = round_repeat * num_prompts
-        # 先保证每个 prompt 至少 1 个
-        base_each = 1
+
+        # 配置项: 可同时设置上下限，若同时设置则需 min <= max
+        raw_max_budget = self.config.algorithm.get("max_budget_per_prompt", None)
+        raw_min_budget = self.config.algorithm.get("min_budget_per_prompt", None)
+
+        max_budget_per_prompt = int(raw_max_budget) if raw_max_budget is not None else None
+        min_budget_per_prompt = int(raw_min_budget) if raw_min_budget is not None else None
+        if (
+            max_budget_per_prompt is not None
+            and min_budget_per_prompt is not None
+            and min_budget_per_prompt > max_budget_per_prompt
+        ):
+            raise ValueError(
+                f"min_budget_per_prompt ({min_budget_per_prompt}) cannot exceed max_budget_per_prompt "
+                f"({max_budget_per_prompt})."
+            )
+
+        # 先保证每个 prompt 至少 min_budget_per_prompt (若未设置则为 1)
+        base_each = min_budget_per_prompt if min_budget_per_prompt is not None else 1
+        if base_each * num_prompts > total_budget:
+            raise ValueError(
+                f"Cannot satisfy min_budget_per_prompt={base_each} with total_budget={total_budget} "
+                f"for {num_prompts} prompts."
+            )
         remaining_budget = max(0, total_budget - base_each * num_prompts)
 
         # 计算权重 w_uid = 1 / p_hat(uid)
@@ -1025,59 +1047,106 @@ class RayPPOTrainer:
             weights[uid] = 1.0 / math.sqrt(p)
         weight_sum = sum(weights.values())
 
-        # Cap a single prompt's budget to avoid one prompt consuming everything.
-        max_budget_per_prompt = int(self.config.algorithm.get("max_budget_per_prompt", 32))
-
         def cap_and_redistribute(per_uid_budget: dict[str, int]) -> dict[str, int]:
             """
-            Enforce per-prompt cap and redistribute overflow to others by weight.
-            Total stays the same unless all prompts hit the cap.
+            Enforce per-prompt min/max and redistribute overflow/underflow by weight.
+            Total stays the same unless constraints are infeasible.
             """
-            overflow = 0
-            for uid in uid_arr:
-                if per_uid_budget[uid] > max_budget_per_prompt:
-                    overflow += per_uid_budget[uid] - max_budget_per_prompt
-                    per_uid_budget[uid] = max_budget_per_prompt
+            # Upper bound handling
+            if max_budget_per_prompt is not None:
+                overflow = 0
+                for uid in uid_arr:
+                    if per_uid_budget[uid] > max_budget_per_prompt:
+                        overflow += per_uid_budget[uid] - max_budget_per_prompt
+                        per_uid_budget[uid] = max_budget_per_prompt
 
-            candidates = [uid for uid in uid_arr if per_uid_budget[uid] < max_budget_per_prompt]
-            while overflow > 0 and candidates:
-                weight_sum_cand = sum(weights[u] for u in candidates)
-                if weight_sum_cand <= 0:
-                    weight_sum_cand = float(len(candidates))
-                    cand_weights = {u: 1.0 for u in candidates}
-                else:
-                    cand_weights = {u: weights[u] for u in candidates}
+                candidates = [uid for uid in uid_arr if per_uid_budget[uid] < max_budget_per_prompt]
+                while overflow > 0 and candidates:
+                    weight_sum_cand = sum(weights[u] for u in candidates)
+                    if weight_sum_cand <= 0:
+                        weight_sum_cand = float(len(candidates))
+                        cand_weights = {u: 1.0 for u in candidates}
+                    else:
+                        cand_weights = {u: weights[u] for u in candidates}
 
-                extra_floats = {u: overflow * (cand_weights[u] / weight_sum_cand) for u in candidates}
-                extra_floor = {u: int(math.floor(v)) for u, v in extra_floats.items()}
-                allocated = 0
-                for u in candidates:
-                    room = max_budget_per_prompt - per_uid_budget[u]
-                    add = min(extra_floor[u], room)
-                    per_uid_budget[u] += add
-                    allocated += add
-                overflow -= allocated
+                    extra_floats = {u: overflow * (cand_weights[u] / weight_sum_cand) for u in candidates}
+                    extra_floor = {u: int(math.floor(v)) for u, v in extra_floats.items()}
+                    allocated = 0
+                    for u in candidates:
+                        room = max_budget_per_prompt - per_uid_budget[u]
+                        add = min(extra_floor[u], room)
+                        per_uid_budget[u] += add
+                        allocated += add
+                    overflow -= allocated
+
+                    if overflow > 0:
+                        frac_order = sorted(
+                            candidates, key=lambda u: extra_floats[u] - extra_floor[u], reverse=True
+                        )
+                        for u in frac_order:
+                            if overflow <= 0:
+                                break
+                            if per_uid_budget[u] < max_budget_per_prompt:
+                                per_uid_budget[u] += 1
+                                overflow -= 1
+
+                    candidates = [uid for uid in uid_arr if per_uid_budget[uid] < max_budget_per_prompt]
+                    if allocated == 0 and (not candidates or weight_sum_cand == 0):
+                        break
 
                 if overflow > 0:
-                    frac_order = sorted(
-                        candidates, key=lambda u: extra_floats[u] - extra_floor[u], reverse=True
+                    print(
+                        f"[warn] Could not redistribute full overflow with cap {max_budget_per_prompt}, "
+                        f"dropping {overflow} samples from budget."
                     )
-                    for u in frac_order:
-                        if overflow <= 0:
-                            break
-                        if per_uid_budget[u] < max_budget_per_prompt:
-                            per_uid_budget[u] += 1
-                            overflow -= 1
 
-                candidates = [u for u in uid_arr if per_uid_budget[u] < max_budget_per_prompt]
-                if allocated == 0 and (not candidates or weight_sum_cand == 0):
-                    break
+            # Lower bound handling
+            if min_budget_per_prompt is not None:
+                underflow = 0
+                for uid in uid_arr:
+                    if per_uid_budget[uid] < min_budget_per_prompt:
+                        underflow += min_budget_per_prompt - per_uid_budget[uid]
+                        per_uid_budget[uid] = min_budget_per_prompt
 
-            if overflow > 0:
-                print(
-                    f"[warn] Could not redistribute full overflow with cap {max_budget_per_prompt}, "
-                    f"dropping {overflow} samples from budget."
-                )
+                candidates = [uid for uid in uid_arr if per_uid_budget[uid] > min_budget_per_prompt]
+                while underflow > 0 and candidates:
+                    weight_sum_cand = sum(weights[u] for u in candidates)
+                    if weight_sum_cand <= 0:
+                        weight_sum_cand = float(len(candidates))
+                        cand_weights = {u: 1.0 for u in candidates}
+                    else:
+                        cand_weights = {u: weights[u] for u in candidates}
+
+                    take_floats = {u: underflow * (cand_weights[u] / weight_sum_cand) for u in candidates}
+                    take_floor = {u: int(math.floor(v)) for u, v in take_floats.items()}
+                    deducted = 0
+                    for u in candidates:
+                        room = per_uid_budget[u] - min_budget_per_prompt
+                        dec = min(take_floor[u], room)
+                        per_uid_budget[u] -= dec
+                        deducted += dec
+                    underflow -= deducted
+
+                    if underflow > 0:
+                        frac_order = sorted(
+                            candidates, key=lambda u: take_floats[u] - take_floor[u], reverse=True
+                        )
+                        for u in frac_order:
+                            if underflow <= 0:
+                                break
+                            if per_uid_budget[u] > min_budget_per_prompt:
+                                per_uid_budget[u] -= 1
+                                underflow -= 1
+
+                    candidates = [u for u in uid_arr if per_uid_budget[u] > min_budget_per_prompt]
+                    if deducted == 0 and (not candidates or weight_sum_cand == 0):
+                        break
+
+                if underflow > 0:
+                    print(
+                        f"[warn] Could not satisfy min_budget_per_prompt={min_budget_per_prompt}, "
+                        f"short by {underflow} after redistribution."
+                    )
             return per_uid_budget
 
         per_uid_budget = {uid: base_each for uid in uid_arr}
@@ -1106,13 +1175,14 @@ class RayPPOTrainer:
             idx = 0
             while overflow > 0 and idx < len(sorted_uids):
                 u = sorted_uids[idx]
-                if per_uid_budget[u] > 1:
+                if per_uid_budget[u] > base_each:
                     per_uid_budget[u] -= 1
                     overflow -= 1
                 else:
                     idx += 1
 
         per_uid_budget = cap_and_redistribute(per_uid_budget)
+
         rounds_info["max_budget_per_prompt"] = max(per_uid_budget.values()) if per_uid_budget else 0
         rounds_info["min_budget_per_prompt"] = min(per_uid_budget.values()) if per_uid_budget else 0
 
