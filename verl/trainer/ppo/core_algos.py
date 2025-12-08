@@ -365,7 +365,7 @@ def compute_grpo_outcome_advantage(
 
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2mean[index[i]]**0.5 + epsilon) # (id2std[index[i]] + epsilon) 
             else:
                 if weights is not None:
                     scores[i] = weights[index[i]] * (scores[i] - id2mean[index[i]])
