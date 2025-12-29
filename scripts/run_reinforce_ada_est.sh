@@ -44,7 +44,7 @@ val_top_p=1.0
 
 # Algorithm setting
 adv_estimator=grpo
-n=4
+n=8
 kl_coef=0.0
 use_kl_in_reward=False
 use_kl_loss=False
