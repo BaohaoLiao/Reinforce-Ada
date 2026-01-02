@@ -989,8 +989,8 @@ class RayPPOTrainer:
 
         # 超参
         alpha = float(self.config.algorithm.get("bayes_alpha", 1.0))
-        beta = float(self.config.algorithm.get("bayes_beta", 16.0))
-        ema_decay = float(self.config.algorithm.get("bayes_ema_decay", 0.9))
+        beta = float(self.config.algorithm.get("bayes_beta", 1.0))
+        ema_decay = float(self.config.algorithm.get("bayes_ema_decay", 0.0))
 
         # GRPO 统计用
         uid_full_stats = {uid: {"total_pos": 0, "total_neg": 0} for uid in uid_arr}
