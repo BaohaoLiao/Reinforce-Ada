@@ -24,7 +24,7 @@ import json
 import os
 import uuid
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pprint import pprint
@@ -955,6 +955,7 @@ class RayPPOTrainer:
           4. 按 w_uid 分配每个 uid 的预算, 并保证至少 1
           5. 一次性生成所有样本, 所有样本全部进入训练 (不再 downsample)
           6. 用当前调用的统计 call_stats 和 ema_decay 对 prev_global_stats 做一次 EMA, 更新 global_stats
+             (若配置了 bayes_window_size，则在窗口内做截断 EMA)
         """
 
         # 上下文对齐用
@@ -967,30 +968,72 @@ class RayPPOTrainer:
         uid_arr = list(orig_prompt_batch.non_tensor_batch["uid"])
         num_prompts = len(uid_arr)
 
+        # 超参
+        alpha = float(self.config.algorithm.get("bayes_alpha", 1.0))
+        beta = float(self.config.algorithm.get("bayes_beta", 16.0))
+        ema_decay = float(self.config.algorithm.get("bayes_ema_decay", 0.9))
+
         # 全局统计结构
         if not hasattr(self, "reinforce_ada_global_stats"):
             self.reinforce_ada_global_stats = {}
 
         global_stats = self.reinforce_ada_global_stats
 
-        # 初始化历史统计
-        for uid in uid_arr:
-            if uid not in global_stats:
-                global_stats[uid] = {"n_total": 0.0, "n_pos": 0.0}
+        # Sliding window (optional) for p_hat stats.
+        raw_window_size = self.config.algorithm.get("bayes_window_size", None)
+        window_size = int(raw_window_size) if raw_window_size is not None else 0
+        use_window = window_size > 0
 
-        # 历史快照, 本次调用里的所有决策只基于这个快照做
-        prev_global_stats = {
-            uid: {"n_total": global_stats[uid]["n_total"], "n_pos": global_stats[uid]["n_pos"]}
-            for uid in uid_arr
-        }
+        def _weighted_window_sum(window: deque[tuple[float, float]]) -> tuple[float, float]:
+            n_total = 0.0
+            n_pos = 0.0
+            length = len(window)
+            if length == 0:
+                return n_total, n_pos
+            for i, (total_i, pos_i) in enumerate(window):
+                power = length - 1 - i
+                weight = ema_decay**power
+                n_total += weight * total_i
+                n_pos += weight * pos_i
+            return n_total, n_pos
+
+        if use_window:
+            if not hasattr(self, "reinforce_ada_window"):
+                self.reinforce_ada_window = {}
+
+            window_store = self.reinforce_ada_window
+            if getattr(self, "reinforce_ada_window_size", None) != window_size:
+                new_store = {}
+                for uid, window in window_store.items():
+                    trimmed = list(window)[-window_size:] if window_size > 0 else []
+                    new_store[uid] = deque(trimmed, maxlen=window_size)
+                window_store = new_store
+                self.reinforce_ada_window = window_store
+                self.reinforce_ada_window_size = window_size
+
+            for uid in uid_arr:
+                if uid not in window_store:
+                    window_store[uid] = deque(maxlen=window_size)
+
+            prev_global_stats = {}
+            for uid in uid_arr:
+                n_total, n_pos = _weighted_window_sum(window_store[uid])
+                prev_global_stats[uid] = {"n_total": n_total, "n_pos": n_pos}
+                global_stats[uid] = {"n_total": n_total, "n_pos": n_pos}
+        else:
+            # 初始化历史统计
+            for uid in uid_arr:
+                if uid not in global_stats:
+                    global_stats[uid] = {"n_total": 0.0, "n_pos": 0.0}
+
+            # 历史快照, 本次调用里的所有决策只基于这个快照做
+            prev_global_stats = {
+                uid: {"n_total": global_stats[uid]["n_total"], "n_pos": global_stats[uid]["n_pos"]}
+                for uid in uid_arr
+            }
 
         # 本次调用内部的累计 (仅用于更新 global_stats, 不影响当前 p 估计)
         call_stats = {uid: {"n_total": 0.0, "n_pos": 0.0} for uid in uid_arr}
-
-        # 超参
-        alpha = float(self.config.algorithm.get("bayes_alpha", 1.0))
-        beta = float(self.config.algorithm.get("bayes_beta", 16.0))
-        ema_decay = float(self.config.algorithm.get("bayes_ema_decay", 0.9))
 
         # GRPO 统计用
         uid_full_stats = {uid: {"total_pos": 0, "total_neg": 0} for uid in uid_arr}
@@ -1286,12 +1329,24 @@ class RayPPOTrainer:
 
         validate_tensordict_performance(final_batch, context="final_batch")
 
-        # ====== 本次调用结束时用一次 EMA 更新到全局 ======
-        for uid in uid_arr:
-            prev = prev_global_stats[uid]
-            call = call_stats[uid]
-            global_stats[uid]["n_total"] = ema_decay * prev["n_total"] + call["n_total"]
-            global_stats[uid]["n_pos"] = ema_decay * prev["n_pos"] + call["n_pos"]
+        # ====== 本次调用结束时更新到全局 ======
+        if use_window:
+            for uid in uid_arr:
+                call = call_stats[uid]
+                window_store[uid].append((call["n_total"], call["n_pos"]))
+
+                n_total, n_pos = _weighted_window_sum(window_store[uid])
+                global_stats[uid]["n_total"] = n_total
+                global_stats[uid]["n_pos"] = n_pos
+
+            self.reinforce_ada_window = window_store
+            self.reinforce_ada_window_size = window_size
+        else:
+            for uid in uid_arr:
+                prev = prev_global_stats[uid]
+                call = call_stats[uid]
+                global_stats[uid]["n_total"] = ema_decay * prev["n_total"] + call["n_total"]
+                global_stats[uid]["n_pos"] = ema_decay * prev["n_pos"] + call["n_pos"]
 
         self.reinforce_ada_global_stats = global_stats
 

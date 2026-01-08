@@ -92,6 +92,7 @@ class AlgoConfig(BaseConfig):
     positive_threshold: float = 0.7
     max_rounds: int = 4
     round_repeat: int = 8
+    bayes_window_size: int | None = None
     global_stat_est: bool = False
     max_budget_per_prompt: int | None = 32
     min_budget_per_prompt: int | None = 2

@@ -90,6 +90,7 @@ algorithm:
   positive_threshold: 0.7
   max_rounds: 4
   round_repeat: 8
+  bayes_window_size: int | None = 0
   global_stat_est: False
   max_budget_per_prompt: int | None = 32
   min_budget_per_prompt: int | None = 2
