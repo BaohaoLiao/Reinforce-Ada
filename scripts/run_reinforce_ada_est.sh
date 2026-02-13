@@ -1,22 +1,20 @@
 #!/bin/bash
 
-cd /data/${KRYLOV_NAMESPACE}/data/baliao/dynamic_filter/03_new_algo/Reinforce-Ada
-
 set -xeuo pipefail
 
-export VLLM_ATTENTION_BACKEND=XFORMERS
+#export VLLM_ATTENTION_BACKEND=XFORMERS
 export WORKING_DIR="${PWD}"
 
 # Model
-model_name_or_path=/mnt/nushare2/data/baliao/PLLMs/qwen/Qwen2.5-Math-1.5B
-model_name=Qwen2.5-Math-1.5B
+model_name_or_path=/mnt/nushare2/data/baliao/PLLMs/qwen/Qwen2.5-Math-7B
+model_name=Qwen2.5-Math-7B
 
 # Wandb setting
 project_name=Reinforce-Ada
-experiment_name=Reinforce-Ada_p_${model_name}_easy_prompt
+exp_name=Reinforce-Ada_square-root-p_${model_name}_hard_prompt_min4max32_noglobal_adv_sqrt_p
 
 # Output
-ckpts_dir="/mnt/nushare2/data/baliao/dynamic_filter/03_new_algo/${experiment_name}"
+ckpts_dir="/mnt/nushare2/data/baliao/dynamic_filter/03_new_algo/${exp_name}"
 mkdir -p "${ckpts_dir}/logs"
 
 # Trainig setting
@@ -46,7 +44,7 @@ val_top_p=1.0
 
 # Algorithm setting
 adv_estimator=grpo
-n=4
+n=8
 kl_coef=0.0
 use_kl_in_reward=False
 use_kl_loss=False
@@ -57,14 +55,19 @@ clip_ratio_high=0.28
 ## Reinforce-Ada setting
 multiround_adaptive_downsampling=True
 reinforce_ada_choice="balanced" # "positive_focused" or "balanced"
-global_stat_est=True
-norm_adv_by_std_in_grpo=False
+global_stat_est=False
+norm_adv_by_std_in_grpo=True
 
 # Training data
-train_path=/mnt/nushare2/data/baliao/dynamic_filter/data/openr1/qwen1.5b_easy/train.parquet
+train_path=/mnt/nushare2/data/baliao/dynamic_filter/data/openr1/qwen7b_easy/train.parquet
 test_path=/mnt/nushare2/data/baliao/dynamic_filter/data/test/test.parquet
 train_files="['$train_path']"
 test_files="['$test_path']"
+
+
+export WANDB_API_KEY=""
+export WANDB_ENTITY="weixiongml-uiuc"
+export WANDB_DIR=${ckpts_dir}/logs
 
 
 python3 -m verl.trainer.main_ppo \
@@ -80,6 +83,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.reinforce_ada_choice=${reinforce_ada_choice} \
     algorithm.global_stat_est=${global_stat_est} \
     algorithm.norm_adv_by_std_in_grpo=${norm_adv_by_std_in_grpo} \
+    algorithm.max_budget_per_prompt=32 \
+    algorithm.min_budget_per_prompt=4 \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
@@ -98,7 +103,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.path="${model_name_or_path}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
@@ -142,7 +147,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=50 \
     trainer.save_freq=50 \
     trainer.total_epochs=1000 \
-    trainer.total_training_steps=800 \
+    trainer.total_training_steps=500 \
     trainer.default_local_dir=${ckpts_dir} \
     trainer.log_val_generations=10 2>&1 | tee ${ckpts_dir}/logs/log
                                                              
